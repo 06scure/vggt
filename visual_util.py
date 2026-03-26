@@ -25,6 +25,7 @@ def predictions_to_glb(
     mask_sky=False,
     target_dir=None,
     prediction_mode="Predicted Pointmap",
+    force_unified_camera=False,
 ) -> trimesh.Scene:
     """
     Converts VGGT predictions to a 3D scene represented as a GLB file.
@@ -76,8 +77,22 @@ def predictions_to_glb(
             pred_world_points_conf = predictions.get("depth_conf", np.ones_like(pred_world_points[..., 0]))
     else:
         print("Using Depthmap and Camera Branch")
-        pred_world_points = predictions["world_points_from_depth"]
-        pred_world_points_conf = predictions.get("depth_conf", np.ones_like(pred_world_points[..., 0]))
+        if force_unified_camera:
+            print("Forcing unified camera parameters (using first frame's camera)")
+            # 使用第一帧的相机参数重新生成所有点云
+            from vggt.utils.geometry import unproject_depth_map_to_point_map
+            S = predictions["depth"].shape[0]
+            # 复制第一帧的外参和内参到所有帧
+            unified_extrinsic = np.tile(predictions["extrinsic"][0:1], (S, 1, 1))
+            unified_intrinsic = np.tile(predictions["intrinsic"][0:1], (S, 1, 1))
+            # 重新反投影
+            pred_world_points = unproject_depth_map_to_point_map(
+                predictions["depth"], unified_extrinsic, unified_intrinsic
+            )
+            pred_world_points_conf = predictions.get("depth_conf", np.ones_like(pred_world_points[..., 0]))
+        else:
+            pred_world_points = predictions["world_points_from_depth"]
+            pred_world_points_conf = predictions.get("depth_conf", np.ones_like(pred_world_points[..., 0]))
 
     # Get images from predictions
     images = predictions["images"]
