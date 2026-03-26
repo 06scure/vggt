@@ -16,11 +16,12 @@ from vggt.models.aggregator import Aggregator
 from vggt.heads.camera_head import CameraHead
 from vggt.heads.dpt_head import DPTHead
 from vggt.heads.track_head import TrackHead
+from vggt.heads.normal_head import NormalHead
 
 
 class VGGT(nn.Module, PyTorchModelHubMixin):
     def __init__(self, img_size=518, patch_size=14, embed_dim=1024,
-                 enable_camera=True, enable_point=True, enable_depth=True, enable_track=True):
+                 enable_camera=True, enable_point=True, enable_depth=True, enable_track=True, enable_normal=True):
         super().__init__()
 
         self.aggregator = Aggregator(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
@@ -29,6 +30,12 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         self.point_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="inv_log", conf_activation="expp1") if enable_point else None
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1") if enable_depth else None
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
+        self.normal_head = NormalHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_normal else None
+
+    def freeze_aggregator(self):
+        """冻结 aggregator 的参数，只训练 heads"""
+        for param in self.aggregator.parameters():
+            param.requires_grad = False
 
     def forward(self, images: torch.Tensor, query_points: torch.Tensor = None):
         """
@@ -48,17 +55,19 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 - depth_conf (torch.Tensor): Confidence scores for depth predictions with shape [B, S, H, W]
                 - world_points (torch.Tensor): 3D world coordinates for each pixel with shape [B, S, H, W, 3]
                 - world_points_conf (torch.Tensor): Confidence scores for world points with shape [B, S, H, W]
+                - normals (torch.Tensor): Predicted surface normal maps with shape [B, 3, H, W] (only frame 0)
+                - normals_conf (torch.Tensor): Confidence scores for normal predictions with shape [B, S, H, W]
                 - images (torch.Tensor): Original input images, preserved for visualization
 
                 If query_points is provided, also includes:
                 - track (torch.Tensor): Point tracks with shape [B, S, N, 2] (from the last iteration), in pixel coordinates
                 - vis (torch.Tensor): Visibility scores for tracked points with shape [B, S, N]
                 - conf (torch.Tensor): Confidence scores for tracked points with shape [B, S, N]
-        """        
+        """
         # If without batch dimension, add it
         if len(images.shape) == 4:
             images = images.unsqueeze(0)
-            
+
         if query_points is not None and len(query_points.shape) == 2:
             query_points = query_points.unsqueeze(0)
 
@@ -71,7 +80,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 pose_enc_list = self.camera_head(aggregated_tokens_list)
                 predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration
                 predictions["pose_enc_list"] = pose_enc_list
-                
+
             if self.depth_head is not None:
                 depth, depth_conf = self.depth_head(
                     aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
@@ -85,6 +94,13 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 )
                 predictions["world_points"] = pts3d
                 predictions["world_points_conf"] = pts3d_conf
+
+            if self.normal_head is not None:
+                normals, normals_conf = self.normal_head(
+                    aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
+                )
+                predictions["normals"] = normals
+                predictions["normals_conf"] = normals_conf
 
         if self.track_head is not None and query_points is not None:
             track_list, vis, conf = self.track_head(

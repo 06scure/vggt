@@ -54,13 +54,14 @@
   - 基类数据集
   - 本方法为非校准的光度立体法，仅读取一组图像、法向量真值(gt_normal)、mask蒙版数据。
   - 在文件夹中从随机抽取图像(防止数据太多而OOM)
+  - 为了兼容Vit的输入，将图像裁减为14的倍数(如:512->504)
 
 - **[training/data/datasets/ps_wild.py](training/data/datasets/ps_wild.py)**
   - 路径在 /home/user/dataset/PSWild
   - 图像分辨率为512*512
   - 继承自基类数据集
   - 每个item有10张图像，约10000个item
-  - 禁用数据增强（如裁剪、缩放）
+  - 禁用数据增强（如随机裁剪、缩放）
 
 - **[training/data/datasets/ps_diligent.py](training/data/datasets/ps_diligent.py)**
   - 路径在 /home/user/dataset/DiLiGenT_518
@@ -75,7 +76,7 @@
   - MSE计算损失训练
   - Mask外的背景信息不计算损失
 
-#### 4. 训练脚本
+#### 4. 训练/评估脚本
 - **[training/train.py](training/train.py)**
   - 训练脚本
 
@@ -91,16 +92,16 @@
          ↓ (N个不同光照的图像)
     ┌─────────────────────────────┐
     │   Aggregator (DINOv2 ViT)   │
-    │  - 帧内注意力 (每帧独立)      │
-    │  - 全局注意力 (跨帧聚合)      │
+    │  - 帧内注意力 (每帧独立)       │
+    │  - 全局注意力 (跨帧聚合)       │
     └─────────────────────────────┘
          ↓
     aggregated_tokens: [B, N, L, C]
          ↓
     ┌─────────────────────────────┐
     │    NormalHead (DPT)         │
-    │  - 多尺度特征融合            │
-    │  - 密集预测解码              │
+    │  - 多尺度特征融合             │
+    │  - 密集预测解码               │
     └─────────────────────────────┘
          ↓
     法向量: [B, 3, H, W] (单位向量)
@@ -129,7 +130,7 @@ Aggregator 中的交替注意力机制:
  - /home/user/dataset/DiLiGenT
  - /home/user/dataset/PSWild
 
- ## 权重文件目录
+ ## 权重文件
  - /home/user/dataset/ckpt/model.pt
 ---
 

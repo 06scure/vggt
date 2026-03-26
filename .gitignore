@@ -2,6 +2,11 @@
 output/
 ckpt/
 .vscode/
+.history/
+logs/
+checkpoints/
+swanlog/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 **/__pycache__/
