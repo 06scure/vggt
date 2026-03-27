@@ -78,6 +78,7 @@
 #### 4. 训练脚本
 - **[training/train.py](training/train.py)**
   - 训练脚本
+  - 使用swanlab监控训练过程
 
 - **[training/eval.py](training/eval.py)**
   - 评估脚本
