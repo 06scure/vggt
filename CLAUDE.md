@@ -126,7 +126,7 @@ Aggregator 中的交替注意力机制:
 ---
 ## 数据集目录
 
- - /home/user/dataset/DiLiGenT
+ - /home/user/dataset/DiLiGenT_518
  - /home/user/dataset/PSWild
 
  ## 权重文件目录
