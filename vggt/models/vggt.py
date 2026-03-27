@@ -16,11 +16,12 @@ from vggt.models.aggregator import Aggregator
 from vggt.heads.camera_head import CameraHead
 from vggt.heads.dpt_head import DPTHead
 from vggt.heads.track_head import TrackHead
+from vggt.heads.normal_head import NormalHead
 
 
 class VGGT(nn.Module, PyTorchModelHubMixin):
     def __init__(self, img_size=518, patch_size=14, embed_dim=1024,
-                 enable_camera=True, enable_point=True, enable_depth=True, enable_track=True):
+                 enable_camera=False, enable_point=False, enable_depth=False, enable_track=False, enable_normal=True):
         super().__init__()
 
         self.aggregator = Aggregator(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim)
@@ -29,6 +30,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         self.point_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="inv_log", conf_activation="expp1") if enable_point else None
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1") if enable_depth else None
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
+        self.normal_head = NormalHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_normal else None  # 法向量预测头，依赖于深度预测的特征
 
     def forward(self, images: torch.Tensor, query_points: torch.Tensor = None):
         """
@@ -71,7 +73,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 pose_enc_list = self.camera_head(aggregated_tokens_list)
                 predictions["pose_enc"] = pose_enc_list[-1]  # pose encoding of the last iteration
                 predictions["pose_enc_list"] = pose_enc_list
-                
+
             if self.depth_head is not None:
                 depth, depth_conf = self.depth_head(
                     aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
@@ -86,6 +88,12 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 predictions["world_points"] = pts3d
                 predictions["world_points_conf"] = pts3d_conf
 
+            if self.normal_head is not None:
+                normal = self.normal_head(
+                    aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
+                )
+                predictions["normal"] = normal
+
         if self.track_head is not None and query_points is not None:
             track_list, vis, conf = self.track_head(
                 aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx, query_points=query_points
@@ -98,6 +106,20 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
             predictions["images"] = images  # store the images for visualization during inference
 
         return predictions
+    
+    def freeze_aggregator(self):
+        """
+        冻结聚合器aggregator的权重，只训练预测头
+
+        用于迁移学习场景，保持预训练的几何特征提取能力不变
+        """
+        for param in self.aggregator.parameters():
+            param.requires_grad = False
+
+        # 确保法向量预测头是可训练的
+        if self.normal_head is not None:
+            for param in self.normal_head.parameters():
+                param.requires_grad = True
 
 
     @classmethod
@@ -119,7 +141,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
 
             # 尝试加载 PyTorch 格式 (支持 pytorch_model.bin 和 model.pt)
             pytorch_path1 = os.path.join(model_id, constants.PYTORCH_WEIGHTS_NAME)  # pytorch_model.bin
-            pytorch_path2 = os.path.join(model_id, "model.pt")  # 你的文件格式
+            pytorch_path2 = os.path.join(model_id, "model.pt")
 
             if os.path.exists(pytorch_path1):
                 return PyTorchModelHubMixin._load_as_pickle(model, pytorch_path1, map_location, strict)
