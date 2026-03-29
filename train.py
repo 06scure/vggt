@@ -22,6 +22,7 @@ import swanlab
 
 # 设置环境变量以优化PyTorch内存分配
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+# 允许 TF32 精度进行加速
 torch.set_float32_matmul_precision('high')
 
 # 添加项目根目录到Python路径
@@ -160,7 +161,7 @@ def main():
     """主训练函数"""
     # 配置参数
     config = {
-        'batch_size': 2,  # 增大batch size以提高显存利用率
+        'batch_size': 2, 
         'num_workers': 8,
         'img_per_seq': 10,  # 每个样本使用10张图像
         'learning_rate': 1e-5,

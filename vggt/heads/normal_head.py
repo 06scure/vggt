@@ -28,7 +28,6 @@ class NormalHead(nn.Module):
         out_channels (List[int], optional): 各层输出通道数
         intermediate_layer_idx (List[int], optional): 用于DPT的中间层索引
         pos_embed (bool, optional): 是否使用位置嵌入. 默认值为True
-        down_ratio (int, optional): 输出分辨率下采样比例. 默认值为1
     """
 
     def __init__(
