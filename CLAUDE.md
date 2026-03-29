@@ -55,14 +55,14 @@
   - 本方法为非校准的光度立体法，仅读取一组图像、法向量真值(gt_normal)、mask蒙版数据。
   - 在文件夹中从随机抽取图像(防止数据太多而OOM)
 
-- **[training/data/datasets/ps_wild.py](training/data/datasets/ps_wild.py)**
+- **[training/data/datasets/ps_wild.py](training/data/datasets/wild.py)**
   - 路径在 /home/user/dataset/PSWild
   - 图像分辨率为512*512
   - 继承自基类数据集
   - 每个item有10张图像，约10000个item
   - 禁用数据增强（如裁剪、缩放）
 
-- **[training/data/datasets/ps_diligent.py](training/data/datasets/ps_diligent.py)**
+- **[training/data/datasets/ps_diligent.py](training/data/datasets/diligent.py)**
   - 路径在 /home/user/dataset/DiLiGenT_518
   - 图像分辨率为518*518
   - DiLiGenTDataset 数据加载器

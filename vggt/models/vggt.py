@@ -32,7 +32,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_track else None
         self.normal_head = NormalHead(dim_in=2 * embed_dim, patch_size=patch_size) if enable_normal else None  # 法向量预测头，依赖于深度预测的特征
 
-    def forward(self, images: torch.Tensor, query_points: torch.Tensor = None):
+    def forward(self, images: torch.Tensor, query_points: Optional[torch.Tensor] = None):
         """
         Forward pass of the VGGT model.
 
@@ -115,6 +115,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         """
         for param in self.aggregator.parameters():
             param.requires_grad = False
+            self.aggregator.eval()  # 设置为评估模式，关闭dropout等训练特定行为
 
         # 确保法向量预测头是可训练的
         if self.normal_head is not None:

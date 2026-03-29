@@ -22,6 +22,7 @@ import swanlab
 
 # 设置环境变量以优化PyTorch内存分配
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+torch.set_float32_matmul_precision('high')
 
 # 添加项目根目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -49,7 +50,7 @@ def setup_logging(log_dir):
     return logging.getLogger(__name__)
 
 
-def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, accum_steps=1, global_step=0):
+def train_one_epoch(model:VGGT, dataloader, criterion, optimizer, device, epoch, accum_steps=1, global_step=0):
     """训练一个epoch"""
     model.train()
     total_loss = 0.0
@@ -100,9 +101,6 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device, epoch, accu
             "train/loss": loss_dict["objective"].item(),
             "lr": current_lr
         }, step=global_step + batch_idx + 1)
-
-        # 清理显存
-        torch.cuda.empty_cache()
 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     return avg_loss, num_batches
@@ -343,6 +341,9 @@ def main():
                 'global_step': global_step,
             }, ckpt_path)
             logger.info(f"Saved checkpoint to {ckpt_path}")
+
+        # 每个 epoch 清理显存
+        torch.cuda.empty_cache()
 
     logger.info("=" * 50)
     logger.info("Training completed!")

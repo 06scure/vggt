@@ -4,8 +4,6 @@
 用于评估训练好的VGGT模型在DiLiGenT_518测试集上的性能。
 计算法向量预测的MAE（平均角度误差）。
 
-使用示例:
-    python eval.py --ckpt_path ckpt/ps_train/best_model.pth
 """
 
 import os
@@ -17,6 +15,7 @@ from tqdm import tqdm
 import logging
 import argparse
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 # 添加项目根目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vggt.models.vggt import VGGT
 from training.data.datasets.diligent import DiLiGenTDataset
 from training.ps_loss import PSLoss
+from vggt.utils.visual_normal import visualize_normal_comparison
 
 
 def setup_logging(log_dir):
@@ -51,12 +51,9 @@ def compute_normal_mae(pred_normal: torch.Tensor, gt_normal: torch.Tensor, mask:
     Returns:
         平均角度误差（度）
     """
-    # 归一化预测法向量，确保是单位向量
-    pred_normal_normalized = F.normalize(pred_normal, p=2, dim=1)
-    gt_normal_normalized = F.normalize(gt_normal, p=2, dim=1)
 
     # 计算余弦相似度
-    dot_product = torch.sum(pred_normal_normalized * gt_normal_normalized, dim=1)
+    dot_product = torch.sum(pred_normal * gt_normal, dim=1)
     dot_product = torch.clamp(dot_product, -1.0 + 1e-7, 1.0 - 1e-7)
 
     # 计算角度（弧度）并转换为度
@@ -72,7 +69,7 @@ def compute_normal_mae(pred_normal: torch.Tensor, gt_normal: torch.Tensor, mask:
     return valid_angles.mean().item()
 
 
-def evaluate_model(model, dataloader, criterion, device, logger):
+def evaluate_model(model, dataloader, criterion, device, logger, vis_dir=None, vis_num=0):
     """
     评估模型性能
 
@@ -82,6 +79,8 @@ def evaluate_model(model, dataloader, criterion, device, logger):
         criterion: 损失函数
         device: 计算设备
         logger: 日志记录器
+        vis_dir: 可视化结果保存目录，None则不保存
+        vis_num: 可视化多少个样本
 
     Returns:
         平均损失和平均角度误差
@@ -90,36 +89,61 @@ def evaluate_model(model, dataloader, criterion, device, logger):
     total_loss = 0.0
     num_batches = 0
     all_normal_errors = []
+    vis_count = 0
+
+    if vis_dir is not None:
+        import os
+        os.makedirs(vis_dir, exist_ok=True)
+        logger.info(f"可视化结果将保存到: {vis_dir}")
 
     with torch.no_grad():
-        pbar = tqdm(dataloader, desc='Evaluation', leave=False)
-        for batch in pbar:
-            # 数据移到设备
-            images = batch['images'].to(device)
-            gt_normal = batch['normal'].to(device)
-            mask = batch['mask'].to(device)
+        with torch.autocast(device_type=device.type,dtype=torch.bfloat16):
+            pbar = tqdm(dataloader, desc='Evaluation', leave=False)
+            for batch in pbar:
+                # 数据移到设备
+                images = batch['images'].to(device)
+                gt_normal = batch['normal'].to(device)
+                mask = batch['mask'].to(device)
 
-            # 前向传播
-            predictions = model(images)
+                # 前向传播
+                predictions = model(images)
 
-            # 计算损失
-            pred_dict = {'normal': predictions['normal']}
-            batch_dict = {'normal': gt_normal, 'mask': mask}
-            loss_dict = criterion(pred_dict, batch_dict)
+                # 计算损失
+                pred_dict = {'normal': predictions['normal']}
+                batch_dict = {'normal': gt_normal, 'mask': mask}
+                loss_dict = criterion(pred_dict, batch_dict)
 
-            # 计算法向量误差
-            mae = compute_normal_mae(predictions['normal'], gt_normal, mask)
-            all_normal_errors.append(mae)
+                # 计算法向量误差
+                mae = compute_normal_mae(predictions['normal'], gt_normal, mask)
+                all_normal_errors.append(mae)
 
-            # 记录损失
-            total_loss += loss_dict['objective'].item()
-            num_batches += 1
+                # 可视化
+                if vis_dir is not None and vis_count < vis_num:
+                    batch_size = images.shape[0]
+                    for i in range(batch_size):
+                        if vis_count >= vis_num:
+                            break
+                        save_path = f"{vis_dir}/sample_{vis_count:04d}.png"
+                        visualize_normal_comparison(
+                            gt_normal=gt_normal[i].cpu(),
+                            pred_normal=predictions['normal'][i].cpu(),
+                            mask=mask[i].cpu(),
+                            save_path=save_path,
+                            title=f"Sample {vis_count} (MAE: {mae:.2f}°)",
+                            show=False
+                        )
+                        vis_count += 1
+                    plt.close('all')
 
-            # 更新进度条
-            pbar.set_postfix({'loss': f'{loss_dict["objective"].item():.4f}', 'MAE': f'{mae:.2f}°'})
+                # 记录损失
+                total_loss += loss_dict['objective'].item()
+                num_batches += 1
 
-            # 清理显存
-            torch.cuda.empty_cache()
+                # 更新进度条
+                pbar.set_postfix({'loss': f'{loss_dict["objective"].item():.4f}', 'MAE': f'{mae:.2f}°'})
+
+        # 清理显存
+        torch.cuda.empty_cache()
 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     avg_mae = np.mean(all_normal_errors) if all_normal_errors else 0.0
@@ -134,14 +158,14 @@ def main():
     parser.add_argument(
         "--ckpt_path",
         type=str,
-        required=True,
+        default="ckpt/ps_train/checkpoint_epoch_2.pt",
         help="训练好的模型检查点路径"
     )
     parser.add_argument(
         "--img_per_seq",
         type=int,
         default=10,
-        help="每个序列使用的图像数量（默认: 10）"
+        help="每个序列使用的图像数量（默认: 16）"
     )
     parser.add_argument(
         "--batch_size",
@@ -160,6 +184,18 @@ def main():
         type=str,
         default="logs/ps_eval",
         help="日志目录（默认: logs/ps_eval）"
+    )
+    parser.add_argument(
+        "--vis_dir",
+        type=str,
+        default="logs/ps_eval/vis_test_bf16",
+        help="可视化结果保存目录（默认: None，不保存）"
+    )
+    parser.add_argument(
+        "--vis_num",
+        type=int,
+        default=10,
+        help="可视化样本数量（默认: 10）"
     )
 
     args = parser.parse_args()
@@ -228,7 +264,10 @@ def main():
     # 评估模型
     logger.info("=" * 50)
     logger.info("Evaluating model...")
-    avg_loss, avg_mae = evaluate_model(model, test_loader, criterion, device, logger)
+    avg_loss, avg_mae = evaluate_model(
+        model, test_loader, criterion, device, logger,
+        vis_dir=args.vis_dir, vis_num=args.vis_num
+    )
 
     logger.info("=" * 50)
     logger.info("Evaluation Results")
