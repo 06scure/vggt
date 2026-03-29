@@ -16,8 +16,8 @@ from vggt.models.aggregator import Aggregator
 from vggt.heads.camera_head import CameraHead
 from vggt.heads.dpt_head import DPTHead
 from vggt.heads.track_head import TrackHead
-from vggt.heads.normal_head import NormalHead
-
+# from vggt.heads.normal_head import NormalHead
+from vggt.heads.normal_head_v2 import NormalHeadV2 as NormalHead
 
 class VGGT(nn.Module, PyTorchModelHubMixin):
     def __init__(self, img_size=518, patch_size=14, embed_dim=1024,
@@ -88,11 +88,22 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 predictions["world_points"] = pts3d
                 predictions["world_points_conf"] = pts3d_conf
 
+            # if self.normal_head is not None:
+            #     # NormalHeadV1版本
+            #     normal = self.normal_head(
+            #         aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
+            #     )
+            #     predictions["normal"] = normal
             if self.normal_head is not None:
-                normal = self.normal_head(
-                    aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx
+                # NormalHeadV2输出多帧结果
+                normal_all, normal_conf = self.normal_head(
+                    aggregated_tokens_list,
+                    images=images,
+                    patch_start_idx=patch_start_idx,
                 )
-                predictions["normal"] = normal
+                predictions["normal_all"] = normal_all
+                predictions["normal_conf"] = normal_conf
+
 
         if self.track_head is not None and query_points is not None:
             track_list, vis, conf = self.track_head(

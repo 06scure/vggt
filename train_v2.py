@@ -1,8 +1,10 @@
 """
-光度立体任务训练脚本
+光度立体任务训练脚本 (版本2)
+
+支持多帧法向量预测 + 不确定性损失
 
 使用示例:
-    python train.py
+    python train_v2.py
 """
 
 import os
@@ -26,7 +28,7 @@ torch.set_float32_matmul_precision('high')
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vggt.models.vggt import VGGT
-from training.ps_loss import PSLoss
+from training.ps_loss_v2 import PSLossV2
 from training.data.datasets.wild import PSWildDataset
 from training.data.datasets.diligent import DiLiGenTDataset
 
@@ -69,7 +71,10 @@ def train_one_epoch(model:VGGT, dataloader, criterion, optimizer, device, epoch,
             predictions = model(images)
 
         # 构建损失计算所需的字典
-        pred_dict = {'normal': predictions['normal']}
+        pred_dict = {
+            'normal_all': predictions['normal_all'],
+            'normal_conf': predictions['normal_conf']
+        }
         batch_dict = {'normal': gt_normal, 'mask': mask}
 
         # 计算损失
@@ -88,17 +93,28 @@ def train_one_epoch(model:VGGT, dataloader, criterion, optimizer, device, epoch,
         total_loss += loss_dict['objective'].item()
         num_batches += 1
 
-        # 更新进度条
-        pbar.set_postfix({'loss': f'{loss_dict["objective"].item():.4f}'})
+        # 更新进度条 - 显示更多信息
+        postfix = {'loss': f'{loss_dict["objective"].item():.4f}'}
+        if 'loss_normal_data' in loss_dict:
+            postfix['data'] = f'{loss_dict["loss_normal_data"].item():.4f}'
+        if 'loss_normal_uncertainty' in loss_dict:
+            postfix['uncert'] = f'{loss_dict["loss_normal_uncertainty"].item():.4f}'
+        pbar.set_postfix(postfix)
 
         # 从optimizer获取当前学习率
         current_lr = optimizer.param_groups[0]['lr']
 
         # 记录到swanlab，使用global_step
-        swanlab.log({
+        log_dict = {
             "train/loss": loss_dict["objective"].item(),
             "lr": current_lr
-        }, step=global_step + batch_idx + 1)
+        }
+        if 'loss_normal_data' in loss_dict:
+            log_dict["train/loss_data"] = loss_dict["loss_normal_data"].item()
+        if 'loss_normal_uncertainty' in loss_dict:
+            log_dict["train/loss_uncertainty"] = loss_dict["loss_normal_uncertainty"].item()
+
+        swanlab.log(log_dict, step=global_step + batch_idx + 1)
 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     return avg_loss, num_batches
@@ -123,13 +139,29 @@ def validate(model, dataloader, criterion, device):
             # 前向传播
             predictions = model(images)
 
-            # 计算损失
-            pred_dict = {'normal': predictions['normal']}
+            # 在验证时，我们需要手动融合多帧预测
+            from vggt.heads.normal_head_v2 import fuse_normals_with_confidence
+            normal_all = predictions['normal_all']
+            normal_conf = predictions['normal_conf']
+            pred_normal = fuse_normals_with_confidence(normal_all, normal_conf, mask=mask)
+
+            # 计算损失 - 为了验证，我们还是构造一个包含'normal'的字典
+            # 注意：这里的损失计算只用融合后的结果，主要是为了监控
+            pred_dict = {
+                'normal_all': predictions['normal_all'],
+                'normal_conf': predictions['normal_conf'],
+                'normal': pred_normal  # 添加融合后的结果
+            }
             batch_dict = {'normal': gt_normal, 'mask': mask}
+
+            # 计算损失（只用per-frame loss，不用fused loss）
+            # 临时修改criterion的use_fused_loss
+            orig_use_fused = criterion.use_fused_loss
+            criterion.use_fused_loss = False
             loss_dict = criterion(pred_dict, batch_dict)
+            criterion.use_fused_loss = orig_use_fused
 
             # 计算角度误差（MAE）
-            pred_normal = predictions['normal']
             valid_mask = mask.to(torch.bool)
 
             # 计算余弦相似度
@@ -146,7 +178,7 @@ def validate(model, dataloader, criterion, device):
             num_batches += 1
 
             # 更新进度条
-            pbar.set_postfix({'loss': f'{loss_dict["objective"].item():.4f}'})
+            pbar.set_postfix({'loss': f'{loss_dict["objective"].item():.4f}', 'MAE': f'{mean_angle_error:.2f}°'})
 
     avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
     avg_mae = np.mean(all_normal_errors) if all_normal_errors else 0.0
@@ -158,7 +190,7 @@ def main():
     """主训练函数"""
     # 配置参数
     config = {
-        'batch_size': 2, 
+        'batch_size': 2,
         'num_workers': 8,
         'img_per_seq': 10,  # 每个样本使用10张图像
         'learning_rate': 1e-5,
@@ -167,10 +199,11 @@ def main():
         'val_epoch_freq': 2,
         'save_epoch_freq': 2,
         'accum_steps': 1,  # 减少梯度累积
-        'log_dir': 'logs/ps_train',
-        'ckpt_dir': 'ckpt/ps_train',
+        'log_dir': 'logs/ps_train_v2',
+        'ckpt_dir': 'ckpt/ps_train_v2',
         'pretrained_ckpt': '/home/user/dataset/ckpt/model.pt',
         'loss_type': 'mse',  # 'mse' 或 'cosine'
+        'uncertainty_weight': 0.1,  # 不确定性损失的权重
     }
     # 设置日志
     logger = setup_logging(config['log_dir'])
@@ -182,14 +215,14 @@ def main():
     # 初始化swanlab
     swanlab.init(
             project="ps-vggt",
-            name=f"ps_train_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            description="Photometric Stereo training with VGGT",
+            name=f"ps_train_v2_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            description="Photometric Stereo training with VGGT (multi-frame + uncertainty)",
             config=config
         )
 
 
     logger.info("=" * 50)
-    logger.info("Starting photometric stereo training")
+    logger.info("Starting photometric stereo training (v2 - multi-frame + uncertainty)")
     logger.info(f"Configuration: {config}")
 
     # 创建检查点目录
@@ -261,8 +294,13 @@ def main():
 
     model = model.to(device)
 
-    # 创建损失函数
-    criterion = PSLoss(normal={'weight': 1.0, 'loss_type': config['loss_type']})
+    # 创建损失函数 - 使用PSLossV2
+    criterion = PSLossV2(
+        normal={'weight': 1.0, 'loss_type': config['loss_type']},
+        uncertainty_weight=config['uncertainty_weight'],
+        use_fused_loss=False,  # 训练时不用融合后的损失
+        use_per_frame_loss=True  # 只用每一帧的损失
+    )
 
     # 创建优化器 - 只优化需要梯度的参数
     optimizer = optim.AdamW(
@@ -315,7 +353,7 @@ def main():
             # 保存最佳模型
             if val_mae < best_mae:
                 best_mae = val_mae
-                best_ckpt_path = os.path.join(config['ckpt_dir'], 'best_model.pt')
+                best_ckpt_path = os.path.join(config['ckpt_dir'], 'best_model_v2.pt')
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
@@ -329,7 +367,7 @@ def main():
 
         # 定期保存检查点
         if epoch % config['save_epoch_freq'] == 0:
-            ckpt_path = os.path.join(config['ckpt_dir'], f'checkpoint_epoch_{epoch}.pt')
+            ckpt_path = os.path.join(config['ckpt_dir'], f'checkpoint_v2_epoch_{epoch}.pt')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
