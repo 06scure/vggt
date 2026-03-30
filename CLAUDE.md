@@ -139,3 +139,88 @@ Aggregator 中的交替注意力机制:
  - 显卡为5070ti(16G),要注意可能会OOM(out of memory)，在保证模型效果的同时尽量节约内存
  - 模型需要训练的参数较少，训练脚本应小批次训练快速验证
  - ViT中已经对RGB自动归一化，注意图像读取维度，RGB的通道顺序问题
+
+---
+
+## V2 版本改进 (多帧预测 + 不确定性损失)
+
+### 问题背景
+V1版本只使用第0帧token进行预测，存在以下问题：
+- 细节丢失严重
+- DiLiGenT测试集MAE约18%，不如传统CNN方法
+- 没有利用不同光照条件的互补信息
+
+### 核心改进
+借鉴VGGT论文中的置信度设计，实现多帧预测和不确定性加权融合：
+
+| 改进项 | V1版本 | V2版本 |
+|:---|:---|:---|
+| **输入token** | 仅第0帧 | 所有帧 |
+| **输出** | 单帧法向量 | 所有帧法向量 + 置信度 |
+| **损失函数** | 简单MSE | 不确定性损失 (1/σ²)*error + α*logσ |
+| **推理** | 直接输出 | 置信度加权融合 |
+
+### 新增文件
+1. **[vggt/heads/normal_head_v2.py](vggt/heads/normal_head_v2.py)**
+   - 支持处理所有帧的token
+   - 输出4通道: 3个法向量 + 1个置信度
+   - 支持分帧处理以节省显存 (frames_chunk_size)
+   - 提供外部融合函数 `fuse_normals_with_confidence()`
+
+2. **[training/ps_loss_v2.py](training/ps_loss_v2.py)**
+   - 不确定性损失 (Aleatoric Uncertainty Loss)
+   - 支持监督每一帧的预测
+   - 可选的融合后损失监督
+   - 配置项: `uncertainty_weight`, `use_fused_loss`, `use_per_frame_loss`
+
+3. **[train_v2.py](train_v2.py)**
+   - 训练脚本V2版本
+   - 支持不确定性损失监控 (loss_data, loss_uncertainty)
+   - 验证时自动融合多帧预测
+
+4. **[eval_v2.py](eval_v2.py)**
+   - 评估脚本V2版本
+   - 使用置信度加权融合多帧预测
+   - 支持可视化
+
+### 数据流图 (V2)
+```
+输入: [B, N, 3, H, W]
+         ↓ (N个不同光照的图像)
+    ┌─────────────────────────────┐
+    │   Aggregator (DINOv2 ViT)   │
+    │  - 帧内注意力 (每帧独立)      │
+    │  - 全局注意力 (跨帧聚合)      │
+    └─────────────────────────────┘
+         ↓
+    aggregated_tokens: [B, N, L, C]
+         ↓
+    ┌─────────────────────────────┐
+    │    NormalHeadV2 (DPT)       │
+    │  - 处理所有帧的token          │
+    │  - 输出: normal_all + conf    │
+    └─────────────────────────────┘
+         ↓
+    ┌─────────────────────────────┐
+    │  外部: 置信度加权融合        │
+    │  weights = softmax(conf)     │
+    │  fused = Σ(weights * normal) │
+    └─────────────────────────────┘
+         ↓
+    法向量: [B, 3, H, W] (单位向量)
+```
+
+### 不确定性损失详解
+
+借鉴VGGT和DUS3R的设计:
+```
+L_total = L_data + α * L_uncertainty
+
+其中:
+  L_data = (1/σ²) * ||pred - gt||²
+  L_uncertainty = log(σ)
+```
+
+- **数据项 (1/σ²) * error**: 置信度低(σ大)的区域，误差权重降低
+- **正则项 log(σ)**: 防止模型过度预测低置信度(σ不能无限大)
+- **α (uncertainty_weight)**: 平衡两个项，通常取0.1~0.3

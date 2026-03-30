@@ -21,8 +21,6 @@ import swanlab
 
 # 设置环境变量以优化PyTorch内存分配
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-# 允许 TF32 精度进行加速
-torch.set_float32_matmul_precision('high')
 
 # 添加项目根目录到Python路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -50,7 +48,18 @@ def setup_logging(log_dir):
     return logging.getLogger(__name__)
 
 
-def train_one_epoch(model:VGGT, dataloader, criterion, optimizer, device, epoch, accum_steps=1, global_step=0):
+def train_one_epoch(
+        model:VGGT, 
+        dataloader, 
+        criterion, 
+        optimizer, 
+        device, 
+        epoch, 
+        accum_steps=1, 
+        global_step=0, 
+        use_bf16=False,
+        max_norm=1.0
+    ):
     """训练一个epoch"""
     model.train()
     total_loss = 0.0
@@ -66,26 +75,28 @@ def train_one_epoch(model:VGGT, dataloader, criterion, optimizer, device, epoch,
         gt_normal = batch['normal'].to(device)  # [B, 3, H, W]
         mask = batch['mask'].to(device)  # [B, H, W]
 
-        # 前向传播
-        with torch.autocast(device_type=device.type, enabled=False):
+        # 前向传播 - 使用BF16混合精度
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
             predictions = model(images)
 
-        # 构建损失计算所需的字典
-        pred_dict = {
-            'normal_all': predictions['normal_all'],
-            'normal_conf': predictions['normal_conf']
-        }
-        batch_dict = {'normal': gt_normal, 'mask': mask}
+            # 构建损失计算所需的字典
+            pred_dict = {
+                'normal_all': predictions['normal_all'],
+                'normal_conf': predictions['normal_conf']
+            }
+            batch_dict = {'normal': gt_normal, 'mask': mask}
 
-        # 计算损失
-        loss_dict = criterion(pred_dict, batch_dict)
-        loss = loss_dict['objective'] / accum_steps
+            # 计算损失
+            loss_dict = criterion(pred_dict, batch_dict)
+            loss = loss_dict['objective'] / accum_steps
 
         # 反向传播
         loss.backward()
 
         # 梯度累积
         if (batch_idx + 1) % accum_steps == 0:
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
             optimizer.step()
             optimizer.zero_grad()
 
@@ -190,20 +201,22 @@ def main():
     """主训练函数"""
     # 配置参数
     config = {
-        'batch_size': 2,
+        'batch_size': 1,
         'num_workers': 8,
         'img_per_seq': 10,  # 每个样本使用10张图像
-        'learning_rate': 1e-5,
+        'learning_rate': 3e-6, 
         'weight_decay': 0.05,
-        'max_epochs': 10,
+        'max_epochs': 6,
         'val_epoch_freq': 2,
         'save_epoch_freq': 2,
-        'accum_steps': 1,  # 减少梯度累积
+        'accum_steps': 2,  # 减少梯度累积
         'log_dir': 'logs/ps_train_v2',
         'ckpt_dir': 'ckpt/ps_train_v2',
         'pretrained_ckpt': '/home/user/dataset/ckpt/model.pt',
         'loss_type': 'mse',  # 'mse' 或 'cosine'
-        'uncertainty_weight': 0.1,  # 不确定性损失的权重
+        'uncertainty_weight': 0.03,  # 不确定性损失的权重
+        'use_bf16': True,  # 启用BF16混合精度训练
+        'grad_clip_max_norm': 1.0,  # 梯度裁剪最大值
     }
     # 设置日志
     logger = setup_logging(config['log_dir'])
@@ -278,7 +291,7 @@ def main():
     # 加载预训练权重
     if os.path.exists(config['pretrained_ckpt']):
         logger.info(f"Loading pretrained weights from {config['pretrained_ckpt']}")
-        state_dict = torch.load(config['pretrained_ckpt'], map_location='cpu')
+        state_dict = torch.load(config['pretrained_ckpt'], map_location='cpu', weights_only=False)
         model.load_state_dict(state_dict, strict=False)
     else:
         logger.warning(f"Pretrained checkpoint not found at {config['pretrained_ckpt']}")
@@ -313,7 +326,7 @@ def main():
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=config['max_epochs'],
-        eta_min=1e-6
+        eta_min=1e-7  # 降低最小学习率
     )
 
     # 训练循环
@@ -324,7 +337,16 @@ def main():
     for epoch in range(1, config['max_epochs'] + 1):
         # 训练
         train_loss, num_batches = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch, config['accum_steps'], global_step
+            model = model, 
+            dataloader = train_loader, 
+            criterion = criterion, 
+            optimizer = optimizer, 
+            device = device, 
+            epoch = epoch,
+            accum_steps = config['accum_steps'], 
+            global_step = global_step, 
+            use_bf16 = config['use_bf16'],
+            max_norm = config['grad_clip_max_norm']
         )
 
         # 更新全局step

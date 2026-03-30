@@ -26,7 +26,7 @@ from vggt.models.vggt import VGGT
 from training.data.datasets.diligent import DiLiGenTDataset
 from training.ps_loss_v2 import PSLossV2
 from vggt.heads.normal_head_v2 import fuse_normals_with_confidence
-from vggt.utils.visual_normal import visualize_normal_comparison
+from vggt.utils.visual_normal import visualize_normal_comparison, visualize_confidence_comparison
 
 
 def setup_logging(log_dir):
@@ -136,6 +136,7 @@ def evaluate_model(model, dataloader, criterion, device, logger, vis_dir=None, v
                 for i in range(batch_size):
                     if vis_count >= vis_num:
                         break
+                    # 法向量对比可视化
                     save_path = f"{vis_dir}/sample_{vis_count:04d}.png"
                     visualize_normal_comparison(
                         gt_normal=gt_normal[i].cpu(),
@@ -143,6 +144,17 @@ def evaluate_model(model, dataloader, criterion, device, logger, vis_dir=None, v
                         mask=mask[i].cpu(),
                         save_path=save_path,
                         title=f"Sample {vis_count} (MAE: {mae:.2f}°)",
+                        show=False
+                    )
+                    # 置信度对比可视化
+                    conf_save_path = f"{vis_dir}/conf_sample_{vis_count:04d}.png"
+                    visualize_confidence_comparison(
+                        gt_normal=gt_normal[i].cpu(),
+                        pred_normal=pred_normal[i].cpu(),
+                        normal_conf=normal_conf[i].cpu(),
+                        mask=mask[i].cpu(),
+                        save_path=conf_save_path,
+                        title=f"Confidence Sample {vis_count} (MAE: {mae:.2f}°)",
                         show=False
                     )
                     vis_count += 1
@@ -213,8 +225,8 @@ def main():
     parser.add_argument(
         "--uncertainty_weight",
         type=float,
-        default=0.1,
-        help="不确定性损失权重（仅用于损失计算，默认: 0.1）"
+        default=0.03,
+        help="不确定性损失权重（仅用于损失计算，默认: 0.03）"
     )
 
     args = parser.parse_args()
@@ -264,12 +276,12 @@ def main():
     logger.info(f"Loading weights from {args.ckpt_path}")
     if args.ckpt_path.endswith('.pth') or args.ckpt_path.endswith('.pt'):
         # 加载完整检查点
-        checkpoint = torch.load(args.ckpt_path, map_location='cpu')
+        checkpoint = torch.load(args.ckpt_path, weights_only=False, map_location='cpu')
         model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         logger.info(f"Checkpoint loaded. Epoch: {checkpoint.get('epoch', 'unknown')}")
     else:
         # 加载直接保存的模型
-        state_dict = torch.load(args.ckpt_path, map_location='cpu')
+        state_dict = torch.load(args.ckpt_path, weights_only=False, map_location='cpu')
         model.load_state_dict(state_dict, strict=False)
 
     # 确保 aggregator 处于冻结状态

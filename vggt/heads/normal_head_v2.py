@@ -14,7 +14,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import List, Tuple, Union
+from typing import List, Tuple, Optional
 
 from vggt.heads.utils import create_uv_grid, position_grid_to_embed
 
@@ -45,7 +45,7 @@ class NormalHeadV2(nn.Module):
         out_channels: List[int] = [256, 512, 1024, 1024],
         intermediate_layer_idx: List[int] = [4, 11, 17, 23],
         pos_embed: bool = True,
-        conf_activation: str = "expp1",
+        conf_activation: str = "softplus", # "expp1", "expp0", "sigmoid", "softplus"
         down_ratio: int = 1,
     ):
         super().__init__()
@@ -155,8 +155,8 @@ class NormalHeadV2(nn.Module):
         aggregated_tokens_list: List[torch.Tensor],
         images: torch.Tensor,
         patch_start_idx: int,
-        frames_start_idx: int = None,
-        frames_end_idx: int = None,
+        frames_start_idx: Optional[int] = None,
+        frames_end_idx: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         前向传播的具体实现，支持处理特定范围的帧
@@ -236,13 +236,15 @@ class NormalHeadV2(nn.Module):
         # 归一化法向量到单位长度
         normal = F.normalize(normal, p=2, dim=-1)
 
-        # 置信度激活
+        # 置信度激活 - Σ表示不确定性，越小越置信
         if self.conf_activation == "expp1":
             conf = 1 + torch.exp(conf)
         elif self.conf_activation == "expp0":
             conf = torch.exp(conf)
         elif self.conf_activation == "sigmoid":
-            conf = torch.sigmoid(conf)
+            conf = 0.1 + torch.sigmoid(conf) * 2.0  # 范围 [0.1, 2.1]
+        elif self.conf_activation == "softplus":
+            conf = torch.nn.functional.softplus(conf) + 0.1  # 范围 (0.1, ∞)
         else:
             raise ValueError(f"Unknown conf_activation: {self.conf_activation}")
 
@@ -296,14 +298,17 @@ class NormalHeadV2(nn.Module):
 def fuse_normals_with_confidence(
     normals: torch.Tensor,
     confidences: torch.Tensor,
-    mask: torch.Tensor = None,
+    mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     使用置信度加权融合多帧法向量预测
 
+    注意：confidences表示不确定性 (Σ)，值越小表示越置信
+
     Args:
         normals: 多帧法向量预测，形状 [B, N, 3, H, W]
-        confidences: 置信度图，形状 [B, N, 1, H, W]
+        confidences: 不确定性图 (Σ)，形状 [B, N, 1, H, W]
+                     值越小表示越置信
         mask: 可选的mask，形状 [B, 1, H, W] 或 [B, H, W]
 
     Returns:
@@ -311,9 +316,13 @@ def fuse_normals_with_confidence(
     """
     B, N, _, H, W = normals.shape
 
-    # 使用softmax将置信度转换为权重
-    # confidences: [B, N, 1, H, W] -> weights: [B, N, 1, H, W]
-    weights = torch.softmax(confidences, dim=1)
+    # 使用 1/σ 作为权重：σ越小（越置信），权重越大
+    # 加一个小偏移防止除零
+    weights = 1.0 / (confidences + 1e-6)  # [B, N, 1, H, W]
+
+    # 归一化权重，使每一帧的权重和为1
+    weights_sum = torch.sum(weights, dim=1, keepdim=True)  # [B, 1, 1, H, W]
+    weights = weights / (weights_sum + 1e-8)  # [B, N, 1, H, W]
 
     # 加权融合法向量
     # normals: [B, N, 3, H, W], weights: [B, N, 1, H, W]

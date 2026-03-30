@@ -93,13 +93,17 @@ def compute_normal_loss_v2(
     """
     计算法向量预测损失V2 - 支持不确定性损失
 
-    借鉴VGGT的aleatoric uncertainty loss：
-    L = Σ [ (1/σ²) * ||pred - gt||² + α log σ ]
+    借鉴VGGT论文的aleatoric uncertainty loss：
+    L = Σ [ ||Σ ⊙ (pred - gt)|| - α log Σ ]
+
+    关键区别（修正版）:
+    - Σ 越小（越置信），给 error 的权重越大
+    - 正则项是 -α log Σ，鼓励 Σ 不要太大
 
     Args:
         pred_dict: 预测字典，包含：
             - 'normal_all': [B, N, 3, H, W] 所有帧的法向量预测
-            - 'normal_conf': [B, N, 1, H, W] 所有帧的置信度（σ = conf）
+            - 'normal_conf': [B, N, 1, H, W] 所有帧的置信度（Σ = conf）
             - 'normal': [B, 3, H, W] 融合后的法向量（可选）
         batch_data: ground truth字典，包含：
             - 'normal': [B, 3, H, W] 或 [3, H, W]，单位法向量
@@ -159,7 +163,7 @@ def compute_normal_loss_v2(
     valid_mask_all = valid_mask.unsqueeze(1).expand(B, N, H, W)
 
     # ==========================
-    # 每一帧的损失（带不确定性）
+    # 每一帧的损失（带不确定性）- 遵循VGGT论文公式
     # ==========================
     if use_per_frame_loss:
         if loss_type == "mse":
@@ -175,16 +179,15 @@ def compute_normal_loss_v2(
         else:
             raise ValueError(f"Unknown loss type: {loss_type}")
 
-        # 置信度作为不确定性 σ = conf
+        # 置信度作为不确定性 Σ = conf (注意：Σ越小越置信)
         sigma = pred_conf_all.squeeze(2)  # [B, N, 1, H, W] -> [B, N, H, W]
 
-        # 数据项: (1/σ²) * error
-        # 注意：sigma使用expp1激活，sigma >= 1，所以1/sigma²不会爆炸
-        data_loss = error / (sigma ** 2 + 1e-8)  # [B, N, H, W]
-
-        # 不确定性正则项: α * log(σ)
-        # 鼓励模型在不确定的地方预测更大的sigma，但不要太大
-        uncertainty_loss = torch.log(sigma + 1e-8)  # [B, N, H, W]
+        # ========== VGGT论文正确形式 ==========
+        # 数据项: Σ * error  (Σ越小，权重越小，越允许误差)
+        # 正则项: - α * log(Σ)  (鼓励Σ不要太大)
+        # =======================================
+        data_loss = sigma * error  # [B, N, H, W]
+        uncertainty_loss = -torch.log(sigma + 1e-8)  # [B, N, H, W]
 
         # 应用mask
         data_loss = data_loss[valid_mask_all]
