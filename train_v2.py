@@ -48,87 +48,17 @@ def setup_logging(log_dir):
     return logging.getLogger(__name__)
 
 
-def train_one_epoch(
-        model:VGGT, 
-        dataloader, 
-        criterion, 
-        optimizer, 
-        device, 
-        epoch, 
-        accum_steps=1, 
-        global_step=0, 
-        use_bf16=False,
-        max_norm=1.0
-    ):
-    """训练一个epoch"""
-    model.train()
-    total_loss = 0.0
-    num_batches = 0
-
-    # 清零梯度
-    optimizer.zero_grad()
-
-    pbar = tqdm(dataloader, desc=f'Epoch {epoch}', leave=False)
-    for batch_idx, batch in enumerate(pbar):
-        # 数据移到设备
-        images = batch['images'].to(device)  # [B, N, 3, H, W]
-        gt_normal = batch['normal'].to(device)  # [B, 3, H, W]
-        mask = batch['mask'].to(device)  # [B, H, W]
-
-        # 前向传播 - 使用BF16混合精度
-        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_bf16):
-            predictions = model(images)
-
-            # 构建损失计算所需的字典
-            pred_dict = {
-                'normal_all': predictions['normal_all'],
-                'normal_conf': predictions['normal_conf']
-            }
-            batch_dict = {'normal': gt_normal, 'mask': mask}
-
-            # 计算损失
-            loss_dict = criterion(pred_dict, batch_dict)
-            loss = loss_dict['objective'] / accum_steps
-
-        # 反向传播
-        loss.backward()
-
-        # 梯度累积
-        if (batch_idx + 1) % accum_steps == 0:
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
-            optimizer.step()
-            optimizer.zero_grad()
-
-        # 记录损失
-        total_loss += loss_dict['objective'].item()
-        num_batches += 1
-
-        # 更新进度条 - 显示更多信息
-        postfix = {'loss': f'{loss_dict["objective"].item():.4f}'}
-        if 'loss_normal_data' in loss_dict:
-            postfix['data'] = f'{loss_dict["loss_normal_data"].item():.4f}'
-        if 'loss_normal_uncertainty' in loss_dict:
-            postfix['uncert'] = f'{loss_dict["loss_normal_uncertainty"].item():.4f}'
-        pbar.set_postfix(postfix)
-
-        # 从optimizer获取当前学习率
-        current_lr = optimizer.param_groups[0]['lr']
-
-        # 记录到swanlab，使用global_step
-        log_dict = {
-            "train/loss": loss_dict["objective"].item(),
-            "lr": current_lr
-        }
-        if 'loss_normal_data' in loss_dict:
-            log_dict["train/loss_data"] = loss_dict["loss_normal_data"].item()
-        if 'loss_normal_uncertainty' in loss_dict:
-            log_dict["train/loss_uncertainty"] = loss_dict["loss_normal_uncertainty"].item()
-
-        swanlab.log(log_dict, step=global_step + batch_idx + 1)
-
-    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-    return avg_loss, num_batches
+def save_checkpoint(model, optimizer, scheduler, epoch, global_step, config, val_mae, ckpt_path):
+    """保存检查点"""
+    torch.save({
+        'epoch': epoch,
+        'global_step': global_step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'val_mae': val_mae,
+        'config': config,
+    }, ckpt_path)
 
 
 def validate(model, dataloader, criterion, device):
@@ -197,27 +127,166 @@ def validate(model, dataloader, criterion, device):
     return avg_loss, avg_mae
 
 
+def train(
+    model,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer,
+    scheduler,
+    device,
+    config,
+    logger
+):
+    """训练主函数 - 按step控制保存和验证"""
+    model.train()
+
+    best_mae = float('inf')
+    global_step = 0
+    accum_steps = config['accum_steps']
+
+    # 清零梯度
+    optimizer.zero_grad()
+
+    for epoch in range(1, config['max_epochs'] + 1):
+        logger.info(f"Starting Epoch {epoch}/{config['max_epochs']}")
+
+        pbar = tqdm(train_loader, desc=f'Epoch {epoch}', leave=False)
+        for batch_idx, batch in enumerate(pbar):
+            current_step = global_step + batch_idx + 1
+
+            # 数据移到设备
+            images = batch['images'].to(device)  # [B, N, 3, H, W]
+            gt_normal = batch['normal'].to(device)  # [B, 3, H, W]
+            mask = batch['mask'].to(device)  # [B, H, W]
+
+            # 前向传播 - 使用BF16混合精度
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=config['use_bf16']):
+                predictions = model(images)
+
+                # 构建损失计算所需的字典
+                pred_dict = {
+                    'normal_all': predictions['normal_all'],
+                    'normal_conf': predictions['normal_conf']
+                }
+                batch_dict = {'normal': gt_normal, 'mask': mask}
+
+                # 计算损失
+                loss_dict = criterion(pred_dict, batch_dict)
+                loss = loss_dict['objective'] / accum_steps
+
+            # 反向传播
+            loss.backward()
+
+            # 梯度累积
+            if (batch_idx + 1) % accum_steps == 0:
+                # 梯度裁剪
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config['grad_clip_max_norm'])
+                optimizer.step()
+                optimizer.zero_grad()
+
+            # 更新进度条
+            postfix = {'loss': f'{loss_dict["objective"].item():.4f}', 'step': current_step}
+            if 'loss_normal_data' in loss_dict:
+                postfix['data'] = f'{loss_dict["loss_normal_data"].item():.4f}'
+            if 'loss_normal_uncertainty' in loss_dict:
+                postfix['uncert'] = f'{loss_dict["loss_normal_uncertainty"].item():.4f}'
+            pbar.set_postfix(postfix)
+
+            # 记录到swanlab
+            current_lr = optimizer.param_groups[0]['lr']
+            log_dict = {
+                "train/loss": loss_dict["objective"].item(),
+                "lr": current_lr
+            }
+            if 'loss_normal_data' in loss_dict:
+                log_dict["train/loss_data"] = loss_dict["loss_normal_data"].item()
+            if 'loss_normal_uncertainty' in loss_dict:
+                log_dict["train/loss_uncertainty"] = loss_dict["loss_normal_uncertainty"].item()
+
+            swanlab.log(log_dict, step=current_step)
+
+            # ========== 按step验证和保存 ==========
+            if current_step % config['save_step_freq'] == 0:
+                logger.info(f"Step {current_step}: Running validation...")
+
+                # 验证
+                val_loss, val_mae = validate(model, val_loader, criterion, device)
+                logger.info(f"Step {current_step} - Val Loss: {val_loss:.4f}, Val MAE: {val_mae:.2f}°")
+
+                # 记录到swanlab
+                swanlab.log({
+                    "val/loss": val_loss,
+                    "val/mae": val_mae
+                }, step=current_step)
+
+                # 保存定期检查点
+                ckpt_path = os.path.join(config['ckpt_dir'], f'checkpoint_step_{current_step}.pt')
+                save_checkpoint(
+                    model, optimizer, scheduler, epoch, current_step,
+                    config, val_mae, ckpt_path
+                )
+                logger.info(f"Saved checkpoint to {ckpt_path}")
+
+                # 保存最佳模型
+                if val_mae < best_mae:
+                    best_mae = val_mae
+                    best_ckpt_path = os.path.join(config['ckpt_dir'], 'best_model_v2.pt')
+                    save_checkpoint(
+                        model, optimizer, scheduler, epoch, current_step,
+                        config, val_mae, best_ckpt_path
+                    )
+                    logger.info(f"Saved best model to {best_ckpt_path} (MAE: {val_mae:.2f}°)")
+
+                # 回到训练模式
+                model.train()
+
+        # 更新全局step
+        global_step += len(train_loader)
+
+        # 更新学习率（每个epoch结束时）
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
+        logger.info(f"Epoch {epoch} completed - LR: {current_lr:.8f}")
+
+        # 每个epoch结束也保存一下（防止step不是正好对齐）
+        epoch_ckpt_path = os.path.join(config['ckpt_dir'], f'checkpoint_epoch_{epoch}.pt')
+        save_checkpoint(
+            model, optimizer, scheduler, epoch, global_step,
+            config, float('inf'), epoch_ckpt_path
+        )
+        logger.info(f"Saved epoch checkpoint to {epoch_ckpt_path}")
+
+        # 清理显存
+        torch.cuda.empty_cache()
+
+    logger.info("=" * 50)
+    logger.info(f"Training completed! Best MAE: {best_mae:.2f}°")
+
+    return best_mae
+
+
 def main():
     """主训练函数"""
     # 配置参数
     config = {
         'batch_size': 1,
         'num_workers': 8,
-        'img_per_seq': 10,  # 每个样本使用10张图像
-        'learning_rate': 3e-6, 
+        'img_per_seq': 10,
+        'learning_rate': 3e-6,
         'weight_decay': 0.05,
         'max_epochs': 6,
-        'val_epoch_freq': 2,
-        'save_epoch_freq': 2,
-        'accum_steps': 2,  # 减少梯度累积
-        'log_dir': 'logs/ps_train_v2',
-        'ckpt_dir': 'ckpt/ps_train_v2',
+        'save_step_freq': 2000,  # 每2000 step保存和验证一次
+        'accum_steps': 2,
+        'log_dir': 'logs/ps_train_v21',
+        'ckpt_dir': 'ckpt/ps_train_v21',
         'pretrained_ckpt': '/home/user/dataset/ckpt/model.pt',
-        'loss_type': 'mse',  # 'mse' 或 'cosine'
-        'uncertainty_weight': 0.03,  # 不确定性损失的权重
-        'use_bf16': True,  # 启用BF16混合精度训练
-        'grad_clip_max_norm': 1.0,  # 梯度裁剪最大值
+        'loss_type': 'mse',
+        'uncertainty_weight': 0.03,
+        'use_bf16': True,
+        'grad_clip_max_norm': 1.0,
     }
+
     # 设置日志
     logger = setup_logging(config['log_dir'])
 
@@ -232,7 +301,6 @@ def main():
             description="Photometric Stereo training with VGGT (multi-frame + uncertainty)",
             config=config
         )
-
 
     logger.info("=" * 50)
     logger.info("Starting photometric stereo training (v2 - multi-frame + uncertainty)")
@@ -252,7 +320,7 @@ def main():
 
     val_dataset = DiLiGenTDataset(
         data_dir='/home/user/dataset/DiLiGenT_518',
-        img_size=518,  # DiLiGenT使用518x518
+        img_size=518,
         img_per_seq=10,
         split='test'
     )
@@ -268,7 +336,7 @@ def main():
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1,  # 验证时batch size为1
+        batch_size=1,
         shuffle=False,
         num_workers=config['num_workers'],
         pin_memory=True
@@ -307,15 +375,15 @@ def main():
 
     model = model.to(device)
 
-    # 创建损失函数 - 使用PSLossV2
+    # 创建损失函数
     criterion = PSLossV2(
         normal={'weight': 1.0, 'loss_type': config['loss_type']},
         uncertainty_weight=config['uncertainty_weight'],
-        use_fused_loss=False,  # 训练时不用融合后的损失
-        use_per_frame_loss=True  # 只用每一帧的损失
+        use_fused_loss=False,
+        use_per_frame_loss=True
     )
 
-    # 创建优化器 - 只优化需要梯度的参数
+    # 创建优化器
     optimizer = optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=config['learning_rate'],
@@ -326,86 +394,21 @@ def main():
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=config['max_epochs'],
-        eta_min=1e-7  # 降低最小学习率
+        eta_min=1e-7
     )
 
-    # 训练循环
-    logger.info("Starting training...")
-    best_mae = float('inf')
-    global_step = 0  # 全局step计数器
-
-    for epoch in range(1, config['max_epochs'] + 1):
-        # 训练
-        train_loss, num_batches = train_one_epoch(
-            model = model, 
-            dataloader = train_loader, 
-            criterion = criterion, 
-            optimizer = optimizer, 
-            device = device, 
-            epoch = epoch,
-            accum_steps = config['accum_steps'], 
-            global_step = global_step, 
-            use_bf16 = config['use_bf16'],
-            max_norm = config['grad_clip_max_norm']
-        )
-
-        # 更新全局step
-        global_step += num_batches
-
-        # 更新学习率
-        scheduler.step()
-        current_lr = scheduler.get_last_lr()[0]
-
-        # 记录
-        logger.info(f"Epoch {epoch}/{config['max_epochs']} - Train Loss: {train_loss:.4f}, LR: {current_lr:.6f}")
-
-
-        # 验证
-        if epoch % config['val_epoch_freq'] == 0:
-            val_loss, val_mae = validate(model, val_loader, criterion, device)
-            logger.info(f"Validation - Loss: {val_loss:.4f}, MAE: {val_mae:.2f}°")
-
-            # 记录到swanlab，使用当前global_step
-            swanlab.log({
-                "val/loss": val_loss,
-                "val/mae": val_mae
-            }, step=global_step)
-
-
-            # 保存最佳模型
-            if val_mae < best_mae:
-                best_mae = val_mae
-                best_ckpt_path = os.path.join(config['ckpt_dir'], 'best_model_v2.pt')
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'val_mae': val_mae,
-                    'config': config,
-                    'global_step': global_step,
-                }, best_ckpt_path)
-                logger.info(f"Saved best model to {best_ckpt_path} (MAE: {val_mae:.2f}°)")
-
-        # 定期保存检查点
-        if epoch % config['save_epoch_freq'] == 0:
-            ckpt_path = os.path.join(config['ckpt_dir'], f'checkpoint_v2_epoch_{epoch}.pt')
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'config': config,
-                'global_step': global_step,
-            }, ckpt_path)
-            logger.info(f"Saved checkpoint to {ckpt_path}")
-
-        # 每个 epoch 清理显存
-        torch.cuda.empty_cache()
-
-    logger.info("=" * 50)
-    logger.info("Training completed!")
-    logger.info(f"Best validation MAE: {best_mae:.2f}°")
+    # 开始训练
+    best_mae = train(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        device=device,
+        config=config,
+        logger=logger
+    )
 
     # 关闭swanlab
     swanlab.finish()

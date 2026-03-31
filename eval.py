@@ -14,7 +14,6 @@ import numpy as np
 from tqdm import tqdm
 import logging
 import argparse
-import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
 # 添加项目根目录到Python路径
@@ -22,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vggt.models.vggt import VGGT
 from training.data.datasets.diligent import DiLiGenTDataset
+from training.data.datasets.wild import PSWildDataset
 from training.ps_loss import PSLoss
 from vggt.utils.visual_normal import visualize_normal_comparison
 
@@ -69,7 +69,7 @@ def compute_normal_mae(pred_normal: torch.Tensor, gt_normal: torch.Tensor, mask:
     return valid_angles.mean().item()
 
 
-def evaluate_model(model, dataloader, criterion, device, logger, vis_dir=None, vis_num=0):
+def evaluate_model(model, dataloader, criterion, device, logger, vis_dir=None, vis_num=0, item_num = 10):
     """
     评估模型性能
 
@@ -188,7 +188,7 @@ def main():
     parser.add_argument(
         "--vis_dir",
         type=str,
-        default="logs/ps_eval/vis_test_bf16",
+        default="logs/ps_eval/vis_v2_wild",
         help="可视化结果保存目录（默认: None，不保存）"
     )
     parser.add_argument(
@@ -211,10 +211,17 @@ def main():
     logger.info(f"Configuration: {vars(args)}")
 
     # 创建数据集
-    logger.info("Loading DiLiGenT_518 test dataset...")
-    dataset = DiLiGenTDataset(
-        data_dir='/home/user/dataset/DiLiGenT_518',
-        img_size=518,
+    # logger.info("Loading DiLiGenT_518 test dataset...")
+    # dataset = DiLiGenTDataset(
+    #     data_dir='/home/user/dataset/DiLiGenT_518',
+    #     img_size=518,
+    #     img_per_seq=args.img_per_seq,
+    #     split='test'
+    # )
+
+    dataset = PSWildDataset(
+        data_dir='/home/user/dataset/PSWild',
+        img_size=504,
         img_per_seq=args.img_per_seq,
         split='test'
     )

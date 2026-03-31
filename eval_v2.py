@@ -183,7 +183,7 @@ def main():
     parser.add_argument(
         "--ckpt_path",
         type=str,
-        default="ckpt/ps_train_v2/best_model_v2.pt",
+        default="ckpt/ps_train_v21/best_model_v2.pt",
         help="训练好的模型检查点路径"
     )
     parser.add_argument(
@@ -207,13 +207,13 @@ def main():
     parser.add_argument(
         "--log_dir",
         type=str,
-        default="logs/ps_eval_v2",
+        default="logs/ps_eval_v21",
         help="日志目录（默认: logs/ps_eval_v2）"
     )
     parser.add_argument(
         "--vis_dir",
         type=str,
-        default="logs/ps_eval_v2/vis",
+        default="logs/ps_eval_v21/vis",
         help="可视化结果保存目录（默认: None，不保存）"
     )
     parser.add_argument(
@@ -225,8 +225,8 @@ def main():
     parser.add_argument(
         "--uncertainty_weight",
         type=float,
-        default=0.03,
-        help="不确定性损失权重（仅用于损失计算，默认: 0.03）"
+        default=0.01,
+        help="不确定性损失权重（仅用于损失计算，默认: 0.01）"
     )
 
     args = parser.parse_args()

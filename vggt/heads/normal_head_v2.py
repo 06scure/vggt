@@ -107,7 +107,7 @@ class NormalHeadV2(nn.Module):
         aggregated_tokens_list: List[torch.Tensor],
         images: torch.Tensor,
         patch_start_idx: int,
-        frames_chunk_size: int = 8,
+        frames_chunk_size: int = 10,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         法向量预测头前向传播，支持处理所有帧的token
@@ -117,7 +117,7 @@ class NormalHeadV2(nn.Module):
             aggregated_tokens_list (List[torch.Tensor]): 聚合后的token列表，来自不同Transformer层
             images (torch.Tensor): 输入图像，形状 [B, N, 3, H, W]，N为光照条件数量
             patch_start_idx (int): Patch token在token序列中的起始索引
-            frames_chunk_size (int, optional): 分批处理的帧数量，用于节省显存. 默认值为8
+            frames_chunk_size (int, optional): 分批处理的帧数量，用于节省显存. 默认值为10
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]:
